@@ -5199,6 +5199,19 @@ final;`,
     await this.renumberGradebookColumnsForGrouping(class_id);
     await this.deleteGradebookColumnBySlug(class_id, "quiz-3");
 
+    // Seeding runs AFTER migrations. Bootstrap the completed fixture through the same
+    // one-time conversion used for pre-existing gradebooks (never on normal column writes).
+    const { data: gradebook, error: gradebookError } = await supabase
+      .from("gradebooks")
+      .select("id")
+      .eq("class_id", class_id)
+      .single();
+    if (gradebookError) throw gradebookError;
+    const { error: groupsError } = await supabase.rpc("initialize_gradebook_column_groups", {
+      p_gradebook_id: gradebook.id
+    });
+    if (groupsError) throw groupsError;
+
     // Quiz scores are set after the delete so quiz-3 never gets any (the delete path has to
     // clear gradebook_column_students first, and there is no reason to make it do more work).
     const { data: quizColumns } = await supabase

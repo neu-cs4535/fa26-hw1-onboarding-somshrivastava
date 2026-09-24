@@ -178,4 +178,51 @@ test.describe("gradebook column groups", () => {
     // eslint-disable-next-line no-console
     console.log(`Group headers when collapsed: ${groupSummaries.join(" | ") || "(none matched by text shape)"}`);
   });
+
+  test("stored labels update live and duplicate names collapse independently", async ({ page }) => {
+    const course = await findSeededClass();
+    const instructor = await findInstructor(course.id);
+    await loginAsUser(page, instructor, course);
+    await page.goto(`/course/${course.id}/manage/gradebook`);
+    await page.getByRole("button", { name: "Collapse all groups" }).click();
+    const quizzes = page.getByText("2 Quizzes...", { exact: true });
+    await expect(quizzes).toHaveCount(2);
+    await quizzes.first().click();
+    await expect(page.getByRole("columnheader").filter({ hasText: /^Quiz 1/ })).toBeVisible();
+    await expect(page.getByRole("columnheader").filter({ hasText: /^Quiz 4/ })).toHaveCount(0);
+
+    const { data: column, error: columnError } = await supabase
+      .from("gradebook_columns")
+      .select("group_id")
+      .eq("class_id", course.id)
+      .eq("slug", "quiz-1")
+      .single();
+    if (columnError || !column?.group_id) throw columnError ?? new Error("Quiz 1 has no persisted group");
+    const { data: group, error: groupError } = await supabase
+      .from("gradebook_column_groups")
+      .select("name")
+      .eq("id", column.group_id)
+      .single();
+    if (groupError || !group) throw groupError ?? new Error("Missing quiz group");
+    try {
+      const { error } = await supabase
+        .from("gradebook_column_groups")
+        .update({ name: "Topic" })
+        .eq("id", column.group_id);
+      if (error) throw error;
+      // No reload: the group controller must receive metadata edits through realtime.
+      await expect(page.getByText("2 Topics...", { exact: true })).toBeVisible();
+      await expect(quizzes).toHaveCount(1);
+      // Renaming does not collapse the already-expanded group or change either slug.
+      await expect(page.getByRole("columnheader").filter({ hasText: /^Quiz 1/ })).toBeVisible();
+      await page.getByRole("button", { name: "Expand all groups" }).click();
+      await expect(page.getByRole("columnheader").filter({ hasText: /^Quiz 4/ })).toBeVisible();
+    } finally {
+      const { error } = await supabase
+        .from("gradebook_column_groups")
+        .update({ name: group.name })
+        .eq("id", column.group_id);
+      if (error) throw error;
+    }
+  });
 });

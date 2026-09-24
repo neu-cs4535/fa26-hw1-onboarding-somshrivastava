@@ -106,6 +106,7 @@ const TABLES_WITH_UPDATED_AT = new Set<TablesThatHaveAnIDField>([
  * broadcasts were missed during disconnection. This data architecture should be improved in the future.
  */
 const TABLE_TO_CHANNEL_MAP: Partial<Record<TablesThatHaveAnIDField, ChannelType[]>> = {
+  gradebook_column_groups: ["staff"],
   // Static tables with no realtime broadcasts - future work might add that!
   submissions: [],
   assignments: [],

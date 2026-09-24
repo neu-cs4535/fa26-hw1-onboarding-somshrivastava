@@ -21,6 +21,7 @@ import {
   useGradebookColumn,
   useGradebookColumnGrades,
   useGradebookColumns,
+  useGradebookColumnGroups,
   useGradebookController,
   useGradebookRefetchStatus,
   useIsGradebookDataReady,
@@ -240,26 +241,17 @@ function buildVisibleReorderUnits(args: {
     if (!String(leaf.id).startsWith("grade_")) continue;
     const colId = Number(String(leaf.id).slice(6));
     const col = gradebookColumns.find((c) => c.id === colId);
-    if (!col?.slug) {
+    if (!col) {
       units.push([colId]);
       continue;
     }
-    const slugParts = col.slug.split("-");
-    let baseGroupName: string;
-    if (slugParts[0] === "assignment" && slugParts.length >= 3) {
-      baseGroupName = `${slugParts[0]}-${slugParts[1]}`;
-    } else {
-      baseGroupName = slugParts[0] || "other";
-    }
-    const groupEntry = Object.entries(groupedColumns).find(
-      ([key, group]) => key.startsWith(baseGroupName) && group.columns.some((c) => c.id === colId)
-    );
+    const groupEntry = Object.entries(groupedColumns).find(([, group]) => group.columns.some((c) => c.id === colId));
     if (!groupEntry || groupEntry[1].columns.length <= 1) {
       units.push([colId]);
       continue;
     }
     const group = groupEntry[1];
-    const collapsed = collapsedGroups.has(group.groupName);
+    const collapsed = collapsedGroups.has(groupEntry[0]);
     if (collapsed) {
       const best = findBestColumnToShow(group.columns);
       if (colId !== best.id) continue;
@@ -644,6 +636,7 @@ function EditColumnDialog({ columnId, onClose }: { columnId: number; onClose: ()
   });
   const [isLoading, setIsLoading] = useState(false);
   const column = useGradebookColumn(columnId);
+  const groups = useGradebookColumnGroups();
 
   type FormValues = {
     name: string;
@@ -654,6 +647,7 @@ function EditColumnDialog({ columnId, onClose }: { columnId: number; onClose: ()
     renderExpression?: string;
     showCalculatedRanges?: boolean;
     instructorOnly: boolean;
+    groupId: string;
   };
 
   const {
@@ -673,7 +667,8 @@ function EditColumnDialog({ columnId, onClose }: { columnId: number; onClose: ()
       scoreExpression: column?.score_expression ?? "",
       renderExpression: column?.render_expression ?? "",
       showCalculatedRanges: column?.show_calculated_ranges ?? false,
-      instructorOnly: column?.instructor_only ?? false
+      instructorOnly: column?.instructor_only ?? false,
+      groupId: column?.group_id?.toString() ?? ""
     }
   });
 
@@ -694,7 +689,8 @@ function EditColumnDialog({ columnId, onClose }: { columnId: number; onClose: ()
         scoreExpression: expr,
         renderExpression: column.render_expression ?? "",
         showCalculatedRanges: column.show_calculated_ranges ?? false,
-        instructorOnly: column.instructor_only ?? false
+        instructorOnly: column.instructor_only ?? false,
+        groupId: column.group_id?.toString() ?? ""
       });
       // Clear any ValidationResult cached from a previously-edited column so
       // a stale error state can't briefly gate the Save button before
@@ -756,6 +752,7 @@ function EditColumnDialog({ columnId, onClose }: { columnId: number; onClose: ()
         id: columnId,
         values: {
           name: data.name,
+          group_id: data.groupId ? Number(data.groupId) : null,
           description: data.description,
           max_score: data.maxScore,
           slug: data.slug,
@@ -823,6 +820,18 @@ function EditColumnDialog({ columnId, onClose }: { columnId: number; onClose: ()
                       {errors.name.message as string}
                     </Text>
                   )}
+                </Box>
+                <Box>
+                  <Label htmlFor="column-group">Column group</Label>
+                  <select id="column-group" {...register("groupId")} style={{ width: "100%", padding: "8px" }}>
+                    <option value="">Ungrouped</option>
+                    {groups.map((group) => (
+                      <option key={group.id} value={group.id}>
+                        {group.name} —{" "}
+                        {gradebookController.columns.find((col) => col.group_id === group.id)?.name ?? "Empty group"}
+                      </option>
+                    ))}
+                  </select>
                 </Box>
                 <Box>
                   <Label htmlFor="description">Description</Label>
@@ -2446,6 +2455,7 @@ export default function GradebookTable() {
   const courseController = useCourseController();
   const gradebookController = useGradebookController();
   const gradebookColumns = useGradebookColumns();
+  const gradebookGroups = useGradebookColumnGroups();
   const [gradebookDataEpoch, setGradebookDataEpoch] = useState(0);
   useEffect(() => {
     return gradebookController.table.subscribeToData(() => {
@@ -2548,93 +2558,35 @@ export default function GradebookTable() {
     slug: col.slug,
     sort_order: col.sort_order,
     name: col.name,
-    max_score: col.max_score
+    max_score: col.max_score,
+    group_id: col.group_id
   }));
   columnsForGrouping.sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
   const cachedColumnsKey = JSON.stringify(columnsForGrouping);
-  // Group gradebook columns by slug prefix, with special handling for assignment sub-groups
+  // Membership and labels come from stored rows. Group order follows the first member;
+  // member order follows sort_order, with id breaking ties deterministically.
   const groupedColumns = useMemo(() => {
     const groups: Record<string, { groupName: string; columns: typeof columnsForGrouping }> = {};
     const columns = JSON.parse(cachedColumnsKey) as typeof columnsForGrouping;
-
-    columns.sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
-
-    let currentGroupKey = "";
-    let currentGroupIndex = 0;
-    let lastSortOrder = -1;
-
-    columns.forEach((col) => {
-      const slugParts = col.slug.split("-");
-      let baseGroupName: string;
-
-      // Special handling for assignment columns
-      if (slugParts[0] === "assignment" && slugParts.length >= 3) {
-        // For assignment-assignment-*, assignment-lab-*, etc., use "assignment-{type}" as the base group
-        baseGroupName = `${slugParts[0]}-${slugParts[1]}`;
-      } else {
-        // For all other columns, use the first part as the base group
-        baseGroupName = slugParts[0] || "other";
-      }
-
-      // Check if this column is contiguous with the previous one
-      const currentSortOrder = col.sort_order ?? 0;
-      const isContiguous = lastSortOrder === -1 || currentSortOrder === lastSortOrder + 1;
-
-      // If not contiguous or different prefix, start a new group
-      if (!isContiguous || baseGroupName !== currentGroupKey) {
-        currentGroupKey = baseGroupName;
-        currentGroupIndex++;
-      }
-
-      const groupKey = `${baseGroupName}-${currentGroupIndex}`;
-
-      if (!groups[groupKey]) {
-        // Format group name for display
-        let displayName: string;
-        if (baseGroupName === "other") {
-          displayName = "Other";
-        } else if (baseGroupName.startsWith("assignment-")) {
-          // For assignment sub-groups, capitalize and format nicely
-          const subType = baseGroupName.split("-")[1];
-          displayName = `${subType.charAt(0).toUpperCase() + subType.slice(1)}`;
-        } else {
-          displayName = baseGroupName.charAt(0).toUpperCase() + baseGroupName.slice(1);
-        }
-
-        groups[groupKey] = {
-          groupName: displayName,
-          columns: []
-        };
-      }
-
-      groups[groupKey].columns.push(col);
-      lastSortOrder = currentSortOrder;
-    });
-
+    const names = new Map(gradebookGroups.map((group) => [group.id, group.name]));
+    columns.sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || a.id - b.id);
+    for (const col of columns) {
+      const name = col.group_id === null ? undefined : names.get(col.group_id);
+      const key = name === undefined ? `column-${col.id}` : `group-${col.group_id}`;
+      groups[key] ??= { groupName: name ?? col.name, columns: [] };
+      groups[key].columns.push(col);
+    }
     return groups;
-  }, [cachedColumnsKey]);
+  }, [cachedColumnsKey, gradebookGroups]);
 
-  // Initialize all groups as collapsed by default, but preserve existing collapsed state
+  // Collapse newly encountered groups once. Preserve explicit expand-all and use IDs,
+  // so two different groups with the same label can be toggled independently.
+  const knownGroupKeys = useRef(new Set<string>());
   useEffect(() => {
-    const allGroupKeys = Object.keys(groupedColumns).filter((key) => groupedColumns[key].columns.length > 1);
-    const baseGroupNames = [...new Set(allGroupKeys.map((key) => groupedColumns[key].groupName))];
-    setCollapsedGroups((prev) => {
-      const newSet = new Set<string>();
-
-      // Preserve existing collapsed state for groups that still exist
-      baseGroupNames.forEach((baseGroupName) => {
-        if (prev.has(baseGroupName)) {
-          newSet.add(baseGroupName);
-        }
-      });
-
-      // If no groups were previously collapsed, collapse all by default
-      if (newSet.size === 0 && baseGroupNames.length > 0) {
-        baseGroupNames.forEach((baseGroupName) => newSet.add(baseGroupName));
-      }
-
-      return newSet;
-    });
+    const keys = Object.keys(groupedColumns).filter((key) => groupedColumns[key].columns.length > 1);
+    const newlySeen = keys.filter((key) => !knownGroupKeys.current.has(key));
+    knownGroupKeys.current = new Set(keys);
+    setCollapsedGroups((prev) => new Set([...keys.filter((key) => prev.has(key)), ...newlySeen]));
   }, [groupedColumns]);
 
   // Force recalculation helper
@@ -2670,15 +2622,15 @@ export default function GradebookTable() {
     }, 50);
   }, [students]);
 
-  // Toggle group collapse/expand using base group name
+  // Toggle group collapse/expand using its stable key
   const toggleGroup = useCallback(
-    (baseGroupName: string) => {
+    (groupKeyToToggle: string) => {
       setCollapsedGroups((prev) => {
         const newSet = new Set(prev);
-        if (newSet.has(baseGroupName)) {
-          newSet.delete(baseGroupName);
+        if (newSet.has(groupKeyToToggle)) {
+          newSet.delete(groupKeyToToggle);
         } else {
-          newSet.add(baseGroupName);
+          newSet.add(groupKeyToToggle);
         }
         return newSet;
       });
@@ -2757,14 +2709,13 @@ export default function GradebookTable() {
   // Collapse all groups
   const collapseAll = useCallback(() => {
     const allGroupKeys = Object.keys(groupedColumns).filter((key) => groupedColumns[key].columns.length > 1);
-    const baseGroupNames = [...new Set(allGroupKeys.map((key) => groupedColumns[key].groupName))];
-    setCollapsedGroups(new Set(baseGroupNames));
+    setCollapsedGroups(new Set(allGroupKeys));
     forceRecalculation();
   }, [groupedColumns, forceRecalculation]);
 
   // Helper function to find the best column to show when collapsed
   const findBestColumnToShow = useCallback(
-    (columns: typeof columnsForGrouping) => {
+    (columns: GradebookGroupedColumnRef[]) => {
       // Start from the last column and work backwards
       for (let i = columns.length - 1; i >= 0; i--) {
         const col = columns[i];
@@ -2796,9 +2747,8 @@ export default function GradebookTable() {
   /**
    * Build columns with header groups
    *
-   * Header groups are created from gradebook columns that share the same slug prefix
-   * (everything before the first hyphen). Groups are only created when multiple
-   * contiguous columns share the same prefix.
+   * Header groups follow explicit database membership. Single-member groups display
+   * as ordinary columns; multi-member groups have a collapsible header.
    *
    * Header Group Behavior:
    * - When EXPANDED: The group header spans all child columns using colSpan,
@@ -2914,8 +2864,8 @@ export default function GradebookTable() {
           enableSorting: true
         });
       } else {
-        // Multiple columns - handle collapsed state using base group name
-        const isCollapsed = collapsedGroups.has(group.groupName);
+        // Multiple columns share a persisted group.
+        const isCollapsed = collapsedGroups.has(groupKey);
         const columnsToShow = isCollapsed ? [findBestColumnToShow(group.columns)] : group.columns;
 
         columnsToShow.forEach((col) => {
@@ -3253,6 +3203,7 @@ export default function GradebookTable() {
       groupName: string;
       isCollapsed: boolean;
       groupColumnsLen: number;
+      groupKey: string;
     };
     const segments: Seg[] = [];
     let pos = 0;
@@ -3266,10 +3217,8 @@ export default function GradebookTable() {
         i++;
         continue;
       }
-      const prefix = column.slug.split("-")[0];
-      const baseGroupName = prefix || "other";
-      const groupEntry = Object.entries(groupedColumns).find(
-        ([key, group]) => key.startsWith(baseGroupName) && group.columns.some((col) => col.id === columnId)
+      const groupEntry = Object.entries(groupedColumns).find(([, group]) =>
+        group.columns.some((col) => col.id === columnId)
       );
       if (!groupEntry || groupEntry[1].columns.length <= 1) {
         pos += getColWidth(leaf.id);
@@ -3279,7 +3228,7 @@ export default function GradebookTable() {
       const group = groupEntry[1];
       const groupColumns = group.columns;
       const isFirstInGroup = groupColumns[0].id === columnId;
-      const isCollapsed = collapsedGroups.has(group.groupName);
+      const isCollapsed = collapsedGroups.has(groupEntry[0]);
       const bestCol = findBestColumnToShow(groupColumns);
       const isVisibleWhenCollapsed = isCollapsed && columnId === bestCol.id;
 
@@ -3294,6 +3243,7 @@ export default function GradebookTable() {
           width,
           key: `grp-${group.groupName}-${columnId}`,
           groupName: group.groupName,
+          groupKey: groupEntry[0],
           isCollapsed,
           groupColumnsLen: groupColumns.length
         });
@@ -3315,15 +3265,12 @@ export default function GradebookTable() {
         const column = gradebookColumns.find((col) => col.id === columnId);
 
         if (column) {
-          const prefix = column.slug.split("-")[0];
-          const baseGroupName = prefix || "other";
-
-          const groupEntry = Object.entries(groupedColumns).find(
-            ([key, group]) => key.startsWith(baseGroupName) && group.columns.some((col) => col.id === columnId)
+          const groupEntry = Object.entries(groupedColumns).find(([, group]) =>
+            group.columns.some((col) => col.id === columnId)
           );
 
           if (groupEntry && groupEntry[1].columns.length > 1) {
-            const isCollapsed = collapsedGroups.has(groupEntry[1].groupName);
+            const isCollapsed = collapsedGroups.has(groupEntry[0]);
 
             if (isCollapsed) {
               const bestColumn = findBestColumnToShow(groupEntry[1].columns);
@@ -3359,7 +3306,7 @@ export default function GradebookTable() {
                 left={0}
                 top={0}
                 bottom={0}
-                onClick={() => toggleGroup((cell.column.columnDef.meta as { groupName?: string })?.groupName || "")}
+                onClick={() => toggleGroup((cell.column.columnDef.meta as { groupKey?: string })?.groupKey || "")}
                 aria-label="Expand group"
                 colorPalette="blue"
                 opacity={0.8}
@@ -3716,7 +3663,7 @@ export default function GradebookTable() {
                           minH="36px"
                           bg={seg.isCollapsed ? "bg.warning" : "bg.emphasized"}
                           cursor="pointer"
-                          onClick={() => toggleGroup(seg.groupName)}
+                          onClick={() => toggleGroup(seg.groupKey)}
                           _hover={{ bg: "bg.info" }}
                           borderBottom="1px solid"
                           borderColor="border.emphasized"
@@ -3726,7 +3673,7 @@ export default function GradebookTable() {
                         >
                           <HStack gap={2} justifyContent="center" alignItems="center" py={1}>
                             <Icon
-                              as={collapsedGroups.has(seg.groupName) ? LuChevronRight : LuChevronDown}
+                              as={collapsedGroups.has(seg.groupKey) ? LuChevronRight : LuChevronDown}
                               boxSize={3}
                               color="fg.muted"
                             />
