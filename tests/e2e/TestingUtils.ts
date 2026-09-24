@@ -2690,7 +2690,8 @@ export async function createAssignmentsAndGradebookColumns({
     minChecksPerCriteria: 2,
     maxChecksPerCriteria: 3
   },
-  groupConfig = "individual" as "individual" | "groups" | "both"
+  groupConfig = "individual" as "individual" | "groups" | "both",
+  gradebookColumnGroupName
 }: {
   class_id: number;
   numAssignments?: number;
@@ -2706,6 +2707,8 @@ export async function createAssignmentsAndGradebookColumns({
     maxChecksPerCriteria: number;
   };
   groupConfig?: "individual" | "groups" | "both";
+  /** Explicitly group the generated assignment columns for gradebook UI tests. */
+  gradebookColumnGroupName?: string;
 }): Promise<{
   assignments: Array<{
     id: number;
@@ -3402,6 +3405,54 @@ export async function createAssignmentsAndGradebookColumns({
     });
 
     assignments.push(assignment);
+  }
+
+  // Gradebook column groups are persisted data now, so fixture columns do not
+  // acquire display groups from their slugs. Tests that exercise collapsed
+  // assignment groups opt in and create the same relationship explicitly.
+  if (gradebookColumnGroupName && assignments.length > 1) {
+    const { data: gradebook, error: gradebookError } = await supabase
+      .from("gradebooks")
+      .select("id")
+      .eq("class_id", class_id)
+      .single();
+    if (gradebookError || !gradebook) {
+      throw new Error(`Failed to find gradebook for class ${class_id}: ${gradebookError?.message}`);
+    }
+
+    const { data: assignmentColumns, error: columnsError } = await supabase
+      .from("gradebook_columns")
+      .select("id")
+      .eq("gradebook_id", gradebook.id)
+      .in(
+        "slug",
+        assignments.map((assignment) => `assignment-${assignment.slug}`)
+      );
+    if (columnsError || !assignmentColumns || assignmentColumns.length !== assignments.length) {
+      throw new Error(
+        `Failed to find generated assignment columns: ${columnsError?.message ?? "column count mismatch"}`
+      );
+    }
+
+    const { data: group, error: groupError } = await supabase
+      .from("gradebook_column_groups")
+      .insert({ class_id, gradebook_id: gradebook.id, name: gradebookColumnGroupName })
+      .select("id")
+      .single();
+    if (groupError || !group) {
+      throw new Error(`Failed to create gradebook column group: ${groupError?.message}`);
+    }
+
+    const { error: membershipError } = await supabase
+      .from("gradebook_columns")
+      .update({ group_id: group.id })
+      .in(
+        "id",
+        assignmentColumns.map((column) => column.id)
+      );
+    if (membershipError) {
+      throw new Error(`Failed to assign fixture columns to their group: ${membershipError.message}`);
+    }
   }
 
   // Create gradebook columns

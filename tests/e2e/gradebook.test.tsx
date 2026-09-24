@@ -309,7 +309,8 @@ test.describe("Gradebook Page - Comprehensive", () => {
       numAssignments: 4,
       numManualGradedColumns: 0,
       manualGradedColumnSlugs: ["participation"],
-      groupConfig: "both"
+      groupConfig: "both",
+      gradebookColumnGroupName: "Assignments"
     });
     //Add an individual submission for first assignment
     const submission1 = await insertPreBakedSubmission({
@@ -871,6 +872,12 @@ test.describe("Gradebook Page - Comprehensive", () => {
     await expect(page.getByRole("button", { name: "Import Columns" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Add Column" })).toBeVisible();
 
+    // The generated assignment columns belong to one stored group, which is
+    // collapsed by default. Expand it before asserting values in its members.
+    const tableRegion = page.getByRole("region", { name: "Instructor Gradebook Table" });
+    await tableRegion.getByRole("button", { name: "Expand all groups" }).click();
+    await waitForVirtualizerIdle(page);
+
     // Check that Student 1's assignments are showing grades, final grade is calculated
     await expect(async () => {
       const after = await readCellNumber(page, students[0].private_profile_name, "Test Assignment 1 (Group)");
@@ -890,10 +897,7 @@ test.describe("Gradebook Page - Comprehensive", () => {
       expect(after).toBe(30);
     }).toPass({ timeout: 60_000 });
 
-    // Expand assignment groups and scroll right to reveal virtualized columns
-    const tableRegion = page.getByRole("region", { name: "Instructor Gradebook Table" });
-    await tableRegion.getByRole("button", { name: "Expand all groups" }).click();
-    await waitForVirtualizerIdle(page);
+    // Scroll right to reveal the remaining virtualized columns
     await tableRegion.evaluate((el) => {
       el.scrollLeft = el.scrollWidth;
     });
@@ -1613,7 +1617,8 @@ test.describe("Gradebook column reorder (issue #531)", () => {
       numAssignments: 4,
       numManualGradedColumns: 0,
       manualGradedColumnSlugs: ["participation"],
-      groupConfig: "both"
+      groupConfig: "both",
+      gradebookColumnGroupName: "Assignments"
     });
   });
 
